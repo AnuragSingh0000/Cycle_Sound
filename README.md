@@ -1,4 +1,4 @@
-```markdown
+
 # Cycle_Sound
 
 ## Overview
@@ -17,51 +17,58 @@ Each direction uses a discrete VAE (via Gumbel‑Softmax quantization) to map in
 - **Transformer Decoder for Cross‑Modal Mapping**: Rather than a heavy encoder–decoder network, the approach uses a lightweight transformer decoder conditioned on source tokens and positional embeddings to predict target tokens.
 - **Modular Design**: Clear separation between VAE modules (for quantization) and Transformer modules (for sequence modeling) allows independent improvement or replacement.
 
-## Model Architectures
+## Training & Generation Workflows
 
-### 1. DiscreteVAE (Image VAE)
+### Audio → Image Pipeline
 
-- **Encoder**: Stacked convolutional blocks + residual layers → projects image to a feature map of size `(C=num_embeddings, H', W')`, where `num_embeddings` = codebook size.
-- **Quantizer**: Applies Gumbel‑Softmax over the channel axis to produce a soft one‑hot map → samples discrete indices → uses them to index learned embedding vectors.
-- **Decoder**: Transposed convolutions + residual upsampling → reconstructs RGB images.
+#### Training
+1. **Pre‑train Image VAE**  
+   - Train a discrete VAE on real images to learn a codebook of visual tokens.  
+   - Encoder compresses images into a grid of code indices; decoder reconstructs the image from those indices.  
+   - Losses: reconstruction (pixel or perceptual) + Gumbel‑Softmax KL regularization.
 
-**Forward pass**:
-```python
-logits = encoder(x)         # [B, num_embeddings, H', W']
-sampled, kl, log_qy = quantizer(logits)
-out = decoder(sampled)       # [B, 3, H, W]
-```  
-**Codebook indices** are obtained via `argmax` on `logits`.
+2. **Train Audio→Image Transformer**  
+   - Freeze the pretrained Image VAE.  
+   - For each training pair (audio clip → corresponding image):  
+     - Convert audio clip to a Mel‑spectrogram.  
+     - Encode spectrogram through the Audio Encoder → sequence of latent audio tokens.  
+     - Use the Image VAE encoder to obtain “ground‑truth” image token indices.  
+     - Transformer Decoder learns to map audio tokens + positional embeddings to the image token sequence.  
+   - Loss: cross‑entropy between predicted token logits and ground‑truth code indices, optionally augmented with a VAE reconstruction loss (decoded image vs. real).
 
-### 2. AudioEncoder & Audio→Image Transformer
+#### Generation
+1. **Encode Audio**  
+   - Input a new audio clip → compute Mel‑spectrogram → Audio Encoder → audio token sequence.
+2. **Predict Image Tokens**  
+   - Transformer Decoder autoregressively generates the full image token sequence conditioned on audio tokens.
+3. **Decode to Image**  
+   - Convert predicted token indices back through the Image VAE decoder to produce the final RGB image.
 
-- **Audio Encoder**: 4× downsampling conv2d layers + BatchNorm + ReLU → outputs `[B, latent_dim, H_s, W_s]`, flattened to `[B, tokens_audio, latent_dim]`.
-- **Positional Embedding**: Learned positional vectors for audio tokens and target image tokens.
-- **Transformer Decoder**: Causal self‑attention on target embeddings, cross‑attention to audio embeddings.
-- **Output Projection**: Linear layer mapping decoder outputs to logits over the VAE codebook (`vocab_size`).
+---
 
-**Generation**:
-```python
-audio_tokens = audio_encoder(spectrogram)             # [B, T_audio, D]
-img_pos = image_pos_emb.repeat(B,1,1)                  # [B, T_image, D]
-logits = transformer_decoder(img_pos, audio_tokens)   # [B, T_image, vocab]
-pred_indices = logits.argmax(-1)                       # [B, T_image]
-```  
-Decode indices with Image VAE to produce final images.
+### Image → Audio Pipeline
 
-### 3. DiscreteVAE (Audio VAE)
+#### Training
+1. **Pre‑train Audio VAE**  
+   - Train a discrete VAE on Mel‑spectrograms extracted from audio clips.  
+   - Encoder compresses each spectrogram into discrete audio tokens; decoder reconstructs spectrogram + waveform.
 
-- **Encoder**: Conv2d blocks → projects spectrogram to `[B, num_embeddings, H', W']`.
-- **Quantizer**: Gumbel‑Softmax one‑hot over channels → discrete audio tokens.
-- **Decoder**: Transposed conv2d → reconstruct Mel‑spectrogram.
-- **Waveform Reconstruction**: Inverse Mel transform via `librosa`.
+2. **Train Image→Audio Transformer**  
+   - Freeze the pretrained Audio VAE.  
+   - For each training pair (image → corresponding audio clip):  
+     - Resize and encode image through the Image Encoder → sequence of image tokens.  
+     - Use the Audio VAE encoder to obtain “ground‑truth” audio token indices.  
+     - Transformer Decoder learns to map image tokens + positional embeddings to the audio token sequence.  
+   - Loss: cross‑entropy between predicted logits and true audio code indices, optionally with reconstruction loss on the decoded spectrogram.
 
-### 4. ImageEncoder & Image→Audio Transformer
-
-- **Image Encoder**: Similar to Image VAE’s encoder but stops before quantization.
-- **Quantizer + Flatten**: Argmax to get discrete indices → flatten to sequence `[B, T_image, D]`.
-- **Transformer Decoder**: Causal decoder predicts audio token logits given image tokens.
-- **Audio Decoder**: Uses discrete tokens to reconstruct spectrogram and waveform.
+#### Generation
+1. **Encode Image**  
+   - Input a new image → Image Encoder → discrete image token sequence.
+2. **Predict Audio Tokens**  
+   - Transformer Decoder autoregressively generates the full audio token sequence conditioned on image tokens.
+3. **Decode to Spectrogram & Waveform**  
+   - Convert tokens through the Audio VAE decoder to reconstruct a Mel‑spectrogram.  
+   - Apply an inverse Mel transform (via librosa) to convert the spectrogram back to a time‑domain waveform.
 
 ## Repository Structure
 
@@ -146,14 +153,5 @@ Edit `Audio_Image/config.py` and `Image_Audio/config.py` to adjust:
 - **Memory**: Lower `batch_size` if OOM errors.
 - **Filename Matching**: Ensure `.jpg` and `.mp3` share the same basename.
 
-## License
 
-MIT © 2025
-
-## Acknowledgements
-
-- **VGG‑Sound** dataset by Google Research
-- Gumbel‑Softmax trick for discrete VAEs
-- Transformer models for sequence modeling
-```
 
